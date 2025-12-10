@@ -154,3 +154,129 @@ class SystemMonitorDashboard:
         for spine in ax.spines.values():
             spine.set_color(color)
             spine.set_linewidth(1.5) # Slightly thinner border
+    def add_control_panel(self):
+        """Enhanced control panel with more interactive elements."""
+        # Use the dedicated controls axis, turn off its own ticks/spines
+        ax_controls_area = self.axes['controls']
+        ax_controls_area.axis('off')
+
+        # Define relative positions for controls within the bottom area
+        control_y_pos = 0.06 # Base Y position for buttons/inputs in figure coords
+        slider_y_pos = 0.08 # Y position for slider in figure coords
+        label_pad = 0.01
+
+        # Pause/Resume button
+        ax_pause = self.fig.add_axes([0.15, control_y_pos, 0.08, 0.05]) # Use fig.add_axes for precise placement
+        self.pause_button = Button(
+            ax_pause, 'Pause', color=COLORS['panel'], hovercolor=COLORS['accent'])
+        self.pause_button.on_clicked(self.toggle_pause)
+        self.pause_button.label.set_color(COLORS['text'])
+        self.pause_button.label.set_fontweight('bold')
+
+
+        # Update interval slider
+        ax_slider = self.fig.add_axes([0.25, slider_y_pos, 0.18, 0.025]) # Adjusted position/size
+        self.interval_slider = Slider(
+            ax=ax_slider,
+            label=' Interval (s):', # Shortened label
+            valmin=1,
+            valmax=10, # Reduced max interval for quicker testing if needed
+            valinit=self.update_interval/1000,
+            valstep=1,
+            color=COLORS['accent'],
+            track_color=COLORS['panel'],
+            handle_style={'facecolor': COLORS['accent'], 'edgecolor': COLORS['text'], 'size': 10}
+        )
+        self.interval_slider.label.set_color(COLORS['text'])
+        self.interval_slider.valtext.set_color(COLORS['text'])
+        self.interval_slider.on_changed(self.update_interval_changed)
+
+        # Network visibility toggle - CORRECTED
+        ax_network_toggle = self.fig.add_axes([0.45, control_y_pos, 0.1, 0.05]) # Adjusted position
+        self.network_toggle = CheckButtons(
+            ax=ax_network_toggle,  # CORRECTED: Use the correct axis variable
+            labels=[' Sent', ' Recv'], # Shortened labels
+            actives=[self.show_network_sent, self.show_network_recv],
+            label_props={'color': [COLORS['text']] * 2, 'fontsize': [9]*2},
+            frame_props={'edgecolor': [COLORS['text']] * 2},
+            check_props={'color': [COLORS['accent']] * 2}
+        )
+        self.network_toggle.on_clicked(self.toggle_network_visibility)
+
+
+        # Threshold controls using TextBox
+        self.threshold_inputs = {}
+        threshold_base_x = 0.58
+        threshold_width = 0.06
+        threshold_spacing = 0.07
+        positions = [
+            # (metric, label, min_val, max_val, multiplier) - Multiplier for display/input units
+            ('cpu', 'CPU%:', 5, 100, 1),
+            ('memory', 'MEM%:', 5, 100, 1),
+            ('disk', 'DISK%:', 5, 100, 1),
+            ('network', 'NET(MB):', 0.1, 100, 1e6), # Input in MB
+            ('process', 'PROC:', 10, 500, 1)
+        ]
+
+        for i, (metric, label, min_val, max_val, multiplier) in enumerate(positions):
+            xpos = threshold_base_x + i * threshold_spacing
+            ax_box = self.fig.add_axes([xpos, control_y_pos, threshold_width, 0.04])
+            initial_val = self.thresholds[metric] / multiplier # Display in appropriate unit
+            self.threshold_inputs[metric] = TextBox(
+                ax_box, label, initial=f"{initial_val:.1f}" if metric=='network' else f"{int(initial_val)}",
+                color=COLORS['panel'],
+                hovercolor=COLORS['panel'],
+                label_pad=label_pad # Adjusted padding
+            )
+            self.threshold_inputs[metric].label.set_color(COLORS['text'])
+            self.threshold_inputs[metric].label.set_fontsize(9)
+            self.threshold_inputs[metric].text_disp.set_color(COLORS['text'])
+            # Use a nested function to capture metric and multiplier correctly in lambda
+            def create_submit_handler(m, mult):
+                return lambda text: self.update_threshold(m, text, mult)
+            self.threshold_inputs[metric].on_submit(create_submit_handler(metric, multiplier))
+
+
+    def add_status_bar(self):
+        """Enhanced status bar using the controls axis."""
+        ax = self.axes['controls']
+        # Use figure coordinates for precise positioning at the very bottom
+        status_y_pos = 0.015
+
+        # Timestamp
+        self.timestamp_text = self.fig.text(
+            0.02, status_y_pos, # Position relative to figure
+            datetime.now().strftime('Last Update: %Y-%m-%d %H:%M:%S'),
+            color=COLORS['text'],
+            fontsize=9,
+            ha='left' # Horizontal alignment
+        )
+
+        # Status text
+        self.status_text = self.fig.text(
+            0.35, status_y_pos, # Position relative to figure
+            'Status: [ACTIVE]',
+            color=COLORS['success'],
+            fontsize=9,
+            fontweight='bold',
+            ha='left'
+        )
+
+        # Uptime - CORRECTED
+        self.uptime_text = self.fig.text(
+            0.65, status_y_pos, # Position relative to figure
+            f"Uptime: {time.strftime('%H:%M:%S', time.gmtime(time.time() - psutil.boot_time()))}", # CORRECTED: Added closing parenthesis
+            color=COLORS['text'],
+            fontsize=9,
+            ha='left'
+        )
+
+        # Refresh rate indicator
+        self.refresh_text = self.fig.text(
+            0.85, status_y_pos, # Position relative to figure
+            f"Refresh: {self.update_interval/1000:.1f}s",
+            color=COLORS['accent'],
+            fontsize=9,
+            ha='left'
+        )
+
