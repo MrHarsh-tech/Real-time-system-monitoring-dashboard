@@ -279,4 +279,247 @@ class SystemMonitorDashboard:
             fontsize=9,
             ha='left'
         )
+    def toggle_pause(self, event):
+        """Toggle pause/resume of updates."""
+        self.paused = not self.paused
+        if self.paused:
+            self.pause_button.label.set_text('Resume')
+            self.status_text.set_text("Status: [PAUSED]")
+            self.status_text.set_color(COLORS['alert'])
+            if self.animation:
+                self.animation.event_source.stop()
+            logging.info("Dashboard paused")
+        else:
+            self.pause_button.label.set_text('Pause')
+            self.status_text.set_text("Status: [RUNNING]")
+            self.status_text.set_color(COLORS['success'])
+            if self.animation:
+                self.animation.event_source.start()
+            logging.info("Dashboard resumed")
+        # self.fig.canvas.draw_idle() # Use draw_idle for better performance with widgets
+        plt.draw() # Keep plt.draw for simplicity here
 
+
+    def toggle_network_visibility(self, label):
+        """Toggle visibility of network sent/received data."""
+        # Need to check the actual status from the widget
+        statuses = self.network_toggle.get_status()
+        self.show_network_sent = statuses[0]
+        self.show_network_recv = statuses[1]
+
+        # if label == ' Sent': # Compare with the actual label text
+        #     self.show_network_sent = not self.show_network_sent
+        # elif label == ' Recv': # Compare with the actual label text
+        #      self.show_network_recv = not self.show_network_recv
+
+        self.update_network_plot() # Redraw only the network plot
+        self.fig.canvas.draw_idle() # Update the canvas efficiently
+        logging.info(f"Network visibility updated: Sent={self.show_network_sent}, Recv={self.show_network_recv}")
+
+
+    def update_interval_changed(self, val):
+        """Handle interval changes from the slider."""
+        try:
+            new_interval = float(val) * 1000
+            if 1000 <= new_interval <= 10000: # Match slider range
+                self.update_interval = int(new_interval) # Store as int ms
+                self.status_text.set_text(f"Status: [INTERVAL UPDATED]")
+                self.status_text.set_color(COLORS['success'])
+                self.refresh_text.set_text(f"Refresh: {val:.1f}s")
+                if self.animation and not self.paused:
+                    self.animation.event_source.stop() # Stop and restart timer
+                    self.animation.event_source.interval = self.update_interval
+                    self.animation.event_source.start()
+                logging.info(f"Update interval changed to {self.update_interval} ms")
+            else:
+                # Reset slider to previous value if out of bounds (optional)
+                # self.interval_slider.set_val(self.update_interval/1000)
+                self.status_text.set_text("Status: [INTERVAL OUT OF RANGE]")
+                self.status_text.set_color(COLORS['alert'])
+                logging.warning(f"Invalid interval requested: {val}s")
+        except ValueError:
+            self.status_text.set_text("Status: [INVALID INTERVAL INPUT]")
+            self.status_text.set_color(COLORS['alert'])
+            logging.error("Invalid non-numeric input for interval slider")
+        self.fig.canvas.draw_idle()
+
+
+    def update_threshold(self, metric, text, multiplier):
+        """Update thresholds from TextBox input with validation."""
+        try:
+            input_val = float(text)
+            new_val = input_val * multiplier # Convert input unit to base unit (bytes for network)
+
+            # Basic validation (can add more specific ranges per metric)
+            if new_val > 0:
+                self.thresholds[metric] = new_val
+                self.status_text.set_text(f"Status: [{metric.upper()} THRESHOLD UPDATED]")
+                self.status_text.set_color(COLORS['success'])
+                logging.info(f"Threshold updated: {metric} = {new_val} (Input: {text})")
+                # Redraw relevant plot to show new threshold line immediately
+                if metric == 'cpu': self.update_cpu_plot()
+                elif metric == 'memory': self.update_memory_plot()
+                elif metric == 'disk': self.update_disk_plot()
+                elif metric == 'network': self.update_network_plot()
+                elif metric == 'process': self.update_process_plot()
+                self.fig.canvas.draw_idle()
+            else:
+                self.status_text.set_text("Status: [VALUE MUST BE POSITIVE]")
+                self.status_text.set_color(COLORS['alert'])
+                # Reset text box to current valid threshold value
+                self.threshold_inputs[metric].set_val(f"{self.thresholds[metric]/multiplier:.1f}" if metric=='network' else f"{int(self.thresholds[metric]/multiplier)}")
+                logging.warning(f"Invalid threshold value for {metric}: {text}")
+        except ValueError:
+            self.status_text.set_text("Status: [INVALID THRESHOLD INPUT]")
+            self.status_text.set_color(COLORS['alert'])
+            # Reset text box to current valid threshold value
+            self.threshold_inputs[metric].set_val(f"{self.thresholds[metric]/multiplier:.1f}" if metric=='network' else f"{int(self.thresholds[metric]/multiplier)}")
+            logging.error(f"Invalid non-numeric input for {metric} threshold: {text}")
+        self.fig.canvas.draw_idle()
+
+
+    def get_system_metrics(self):
+        """Collect system metrics with error handling."""
+        try:
+            # Get network counters before CPU percent to measure over the interval
+            net_before = psutil.net_io_counters()
+            cpu_usage = psutil.cpu_percent(interval=0.5) # Non-blocking interval
+            net_after = psutil.net_io_counters()
+
+            # Calculate network usage delta over the interval (approximate rate)
+            # Note: This gives total bytes since boot, not rate. Rate calculation needs previous values.
+            # Storing totals is simpler for this example. Thresholds apply to total usage reported.
+            # For rate, you'd store previous values and subtract.
+            # Let's keep it simple and use the total bytes reported by psutil for now.
+            # The threshold check will compare these totals.
+
+            return {
+                'time': datetime.now().strftime('%H:%M:%S'),
+                'cpu': cpu_usage,
+                'memory': psutil.virtual_memory().percent,
+                'disk': psutil.disk_usage('/').percent,
+                'process': len(psutil.pids()),
+                'network_sent': net_after.bytes_sent,
+                'network_recv': net_after.bytes_recv
+            }
+        except Exception as e:
+            logging.error(f"Error collecting system metrics: {str(e)}")
+            # Optionally return last known good values or None/default dict
+            return None
+
+
+    def check_thresholds(self, metrics):
+        """Check for threshold violations and update alerts."""
+        if not metrics:
+            return
+
+        new_alerts = []
+        timestamp = metrics['time'] # Use the timestamp from metrics collection
+
+        if metrics['cpu'] > self.thresholds['cpu']:
+            alert_msg = f"CPU: {metrics['cpu']:.1f}% > {self.thresholds['cpu']:.0f}%"
+            new_alerts.append(alert_msg)
+            logging.warning(f"Alert Triggered: {alert_msg}")
+
+        if metrics['memory'] > self.thresholds['memory']:
+            alert_msg = f"MEM: {metrics['memory']:.1f}% > {self.thresholds['memory']:.0f}%"
+            new_alerts.append(alert_msg)
+            logging.warning(f"Alert Triggered: {alert_msg}")
+
+        if metrics['disk'] > self.thresholds['disk']:
+            alert_msg = f"DISK: {metrics['disk']:.1f}% > {self.thresholds['disk']:.0f}%"
+            new_alerts.append(alert_msg)
+            logging.warning(f"Alert Triggered: {alert_msg}")
+
+        # Network check (compare total bytes, convert threshold to MB for message)
+        net_thresh_mb = self.thresholds['network'] / 1e6
+        # Note: Comparing total bytes sent/received since boot might not be ideal for alerts.
+        # A better approach would be rate (MB/s), which requires storing previous values.
+        # Keeping the current simpler logic for this example.
+        # Let's change the check to be more meaningful, e.g., if *increase* per interval is high
+        # For now, sticking to the original logic comparing totals:
+        if metrics['network_sent'] > self.thresholds['network']:
+            sent_mb = metrics['network_sent'] / 1e6
+            # alert_msg = f"NET SENT: {sent_mb:.1f}MB > {net_thresh_mb:.1f}MB (Total)" # Indicate it's total
+            # new_alerts.append(alert_msg)
+            # logging.warning(f"Alert Triggered: {alert_msg}")
+            pass # Deactivate simple total check for network as it's less useful
+
+        if metrics['network_recv'] > self.thresholds['network']:
+            recv_mb = metrics['network_recv'] / 1e6
+            # alert_msg = f"NET RECV: {recv_mb:.1f}MB > {net_thresh_mb:.1f}MB (Total)" # Indicate it's total
+            # new_alerts.append(alert_msg)
+            # logging.warning(f"Alert Triggered: {alert_msg}")
+            pass # Deactivate simple total check for network
+
+        if metrics['process'] > self.thresholds['process']:
+            alert_msg = f"PROC: {metrics['process']} > {self.thresholds['process']}"
+            new_alerts.append(alert_msg)
+            logging.warning(f"Alert Triggered: {alert_msg}")
+
+        if new_alerts:
+            alert_tuples = [(timestamp, alert) for alert in new_alerts]
+            self.alerts.extend(alert_tuples)
+            self.alert_history.extend(alert_tuples) # Keep full history
+            self.alerts = self.alerts[-8:]  # Limit displayed alerts
+            self.status_text.set_text("Status: [ALERT TRIGGERED]")
+            self.status_text.set_color(COLORS['alert'])
+            # Update alert panel immediately
+            self.update_alert_panel()
+
+
+    def update_dashboard(self, frame):
+        """Main update function called by FuncAnimation."""
+        if self.paused:
+            # Return list of artists that need updating (empty if paused and not using blit)
+            return []
+
+        metrics = self.get_system_metrics()
+        if not metrics:
+            self.status_text.set_text("Status: [METRICS ERROR]")
+            self.status_text.set_color(COLORS['alert'])
+            # Decide how to handle missing metrics in plots (e.g., skip update, show gap)
+            return [] # Skip update if metrics failed
+
+        # Check thresholds before updating history (so history reflects state *before* alert check)
+        self.check_thresholds(metrics) # This might update status text
+
+        # Update history (only if metrics were successful)
+        current_time = metrics['time'] # Use consistent time
+        self.metrics_history['time'].append(current_time)
+        self.metrics_history['cpu'].append(metrics['cpu'])
+        self.metrics_history['memory'].append(metrics['memory'])
+        self.metrics_history['disk'].append(metrics['disk'])
+        self.metrics_history['network_sent'].append(metrics['network_sent'])
+        self.metrics_history['network_recv'].append(metrics['network_recv'])
+        self.metrics_history['process'].append(metrics['process'])
+
+        # Trim history to max_data_points
+        for key in self.metrics_history:
+            if len(self.metrics_history[key]) > self.max_data_points:
+                self.metrics_history[key] = self.metrics_history[key][-self.max_data_points:]
+
+        # Update status bar text elements (only if not paused and no alert triggered/metric error)
+        if not self.paused and self.status_text.get_text() not in ["Status: [ALERT TRIGGERED]", "Status: [METRICS ERROR]"]:
+             self.status_text.set_text("Status: [RUNNING]")
+             self.status_text.set_color(COLORS['success'])
+
+        self.timestamp_text.set_text(f"Last Update: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        # Uptime update can be less frequent, but ok here for simplicity
+        self.uptime_text.set_text(f"Uptime: {time.strftime('%H:%M:%S', time.gmtime(time.time() - psutil.boot_time()))}")
+
+
+        # Update all plots and panels
+        artists = []
+        artists.extend(self.update_cpu_plot())
+        artists.extend(self.update_memory_plot())
+        artists.extend(self.update_disk_plot())
+        artists.extend(self.update_network_plot())
+        artists.extend(self.update_process_plot())
+        artists.extend(self.update_alert_panel()) # Update alert panel even if no new alerts (to clear old ones)
+        artists.extend(self.update_summary_panel(metrics))
+
+        # When not using blit=True, FuncAnimation expects an iterable of artists, but returning
+        # an empty list works fine as matplotlib redraws the whole figure anyway.
+        # If using blit=True, you MUST return all modified artists.
+        return []
