@@ -523,3 +523,297 @@ class SystemMonitorDashboard:
         # an empty list works fine as matplotlib redraws the whole figure anyway.
         # If using blit=True, you MUST return all modified artists.
         return []
+def update_plot(self, ax, title, color, data_key, threshold_key=None, unit='%', is_network=False):
+        """Generic plot update returning list of artists modified (for blitting, though not used)."""
+        ax.clear() # Clear previous drawings
+        self.configure_plot(ax, title, color) # Reapply base configuration
+        artists = [] # Keep track of artists if blitting is desired later
+
+        times = self.metrics_history['time']
+        data = self.metrics_history[data_key]
+
+        if not times or not data: # No data yet
+             return artists
+
+        y_data = data
+        threshold_value = None
+        threshold_unit_multiplier = 1e6 if is_network else 1
+
+        if is_network:
+            y_data = [d / threshold_unit_multiplier for d in data] # Convert bytes to MB for plotting
+
+        # Threshold line and fill
+        if threshold_key and threshold_key in self.thresholds:
+            threshold_value = self.thresholds[threshold_key] / threshold_unit_multiplier # Threshold in plot units (e.g., MB)
+            line = ax.axhline(y=threshold_value, color=COLORS['threshold'], linestyle='--', alpha=0.7, linewidth=1.5, label=f'Threshold ({threshold_value:.1f}{unit})')
+            artists.append(line)
+
+            # Fill area above threshold
+            y_data_np = np.array(y_data)
+            fill = ax.fill_between(
+                times,
+                threshold_value,
+                y_data_np,
+                where=y_data_np > threshold_value,
+                color=COLORS['alert'], alpha=0.2, interpolate=True
+            )
+            # fill_between returns a PolyCollection, which is an Artist
+            if fill: artists.append(fill)
+
+
+        # Plot the main data line
+        line, = ax.plot(
+            times,
+            y_data,
+            color=color,
+            linewidth=2.0, # Slightly thinner line
+            marker='o',
+            markersize=4, # Slightly smaller marker
+            markerfacecolor=COLORS['background'],
+            markeredgecolor=color,
+            markeredgewidth=1.0,
+            path_effects=[path_effects.SimpleLineShadow(shadow_color='black', alpha=0.3), path_effects.Normal()],
+            label=f'Current: {y_data[-1]:.1f}{unit}' # Add current value to label
+        )
+        artists.append(line)
+
+        # Add value annotation near the last point
+        last_value = y_data[-1]
+        annotation = ax.annotate(
+            f'{last_value:.1f}{unit}',
+            xy=(len(times)-1, last_value), # Position based on index
+            xytext=(8, 0), # Offset pixels
+            textcoords='offset points',
+            color=color,
+            fontsize=9, # Smaller annotation
+            fontweight='bold',
+            bbox=dict(
+                boxstyle='round,pad=0.3',
+                fc=COLORS['panel'],
+                ec=color,
+                lw=1.0, # Thinner border
+                alpha=0.8 # Slightly more transparent
+            )
+        )
+        artists.append(annotation)
+
+        # Adjust Y-axis limits dynamically (with padding)
+        if y_data:
+            min_val = min(y_data)
+            max_val = max(y_data)
+            padding = (max_val - min_val) * 0.1 + 1 # Add small absolute padding too
+            y_min = 0 # Generally start Y axis at 0 for usage plots
+            y_max = max(max_val + padding, threshold_value + padding if threshold_value else 0)
+            # For percentage plots, cap max at slightly above 100 if threshold isn't higher
+            if unit == '%' and (not threshold_value or threshold_value <= 100):
+                 y_max = max(y_max, 105) # Ensure 100% is visible
+            elif is_network and (not threshold_value or threshold_value < 1):
+                 y_max = max(y_max, 1.0) # Ensure small MB values have some scale
+
+            ax.set_ylim(y_min, y_max)
+
+        # Add legend if threshold is present
+        #if threshold_key:
+        #    leg = ax.legend(loc='upper left', fontsize=8, facecolor=COLORS['panel'], edgecolor=color)
+        #    if leg: artists.extend(leg.get_texts())
+        #    if leg: artists.extend(leg.get_lines())
+        #    if leg: artists.append(leg.get_frame())
+
+        # Return artists for blitting if needed (currently not used)
+        return artists
+
+
+    def update_cpu_plot(self):
+        return self.update_plot(self.axes['cpu'], 'CPU USAGE (%)', COLORS['cpu'], 'cpu', 'cpu', '%')
+
+    def update_memory_plot(self):
+        return self.update_plot(self.axes['memory'], 'MEMORY USAGE (%)', COLORS['memory'], 'memory', 'memory', '%')
+
+    def update_disk_plot(self):
+        return self.update_plot(self.axes['disk'], 'DISK USAGE (%)', COLORS['disk'], 'disk', 'disk', '%')
+
+    def update_process_plot(self):
+        return self.update_plot(self.axes['process'], 'ACTIVE PROCESSES', COLORS['process'], 'process', 'process', '')
+
+
+    def update_network_plot(self):
+        """Update network plot with Sent/Received lines and threshold."""
+        ax = self.axes['network']
+        ax.clear()
+        self.configure_plot(ax, 'NETWORK TRAFFIC (Total MB)', COLORS['network']) # Clarify Total
+        artists = []
+        times = self.metrics_history['time']
+
+        if not times: return artists
+
+        threshold_mb = self.thresholds['network'] / 1e6
+
+        # Threshold line
+        line_thresh = ax.axhline(y=threshold_mb, color=COLORS['threshold'], linestyle='--', alpha=0.7, linewidth=1.5, label=f'Threshold ({threshold_mb:.1f} MB)')
+        artists.append(line_thresh)
+
+        max_val = 0 # Track max value for Y-axis scaling
+
+        # Plot sent data if enabled
+        if self.show_network_sent:
+            sent_mb = [x/1e6 for x in self.metrics_history['network_sent']]
+            if sent_mb: max_val = max(max_val, max(sent_mb))
+            line_sent, = ax.plot(
+                times, sent_mb,
+                color=COLORS['network'], linewidth=2.0, label=f'Sent: {sent_mb[-1]:.1f} MB' if sent_mb else 'Sent',
+                marker='^', markersize=4, markerfacecolor=COLORS['background'], markeredgecolor=COLORS['network']
+            )
+            artists.append(line_sent)
+
+        # Plot received data if enabled
+        if self.show_network_recv:
+            recv_mb = [x/1e6 for x in self.metrics_history['network_recv']]
+            if recv_mb: max_val = max(max_val, max(recv_mb))
+            line_recv, = ax.plot(
+                times, recv_mb,
+                color=COLORS['accent'], linewidth=2.0, label=f'Recv: {recv_mb[-1]:.1f} MB' if recv_mb else 'Recv',
+                marker='v', markersize=4, markerfacecolor=COLORS['background'], markeredgecolor=COLORS['accent']
+            )
+            artists.append(line_recv)
+
+        # Adjust Y-axis limits
+        padding = max_val * 0.1 + 0.5 # Add some padding
+        ax.set_ylim(0, max(max_val + padding, threshold_mb + padding))
+
+        # Add legend if any data is shown
+        if self.show_network_sent or self.show_network_recv:
+            leg = ax.legend(
+                loc='upper left',
+                facecolor=COLORS['panel'],
+                edgecolor=COLORS['text'], # Use text color for legend border
+                fontsize=8 # Smaller legend font
+            )
+            if leg: # Add legend artists if blitting
+                artists.extend(leg.get_texts())
+                artists.extend(leg.get_lines())
+                artists.append(leg.get_frame())
+
+        return artists
+
+
+    def update_alert_panel(self):
+        """Update the alert panel text."""
+        ax = self.axes['alert']
+        ax.clear() # Clear previous text
+        ax.set_title('ALERTS', color=COLORS['alert'], pad=10, fontsize=12, fontweight='bold')
+        ax.axis('off') # Keep axis off
+        artists = [] # For blitting if needed
+
+        if self.alerts:
+            # Display newest alerts at the top
+            for i, (timestamp, alert) in enumerate(reversed(self.alerts)): # Show last 8, newest first
+                 txt = ax.text(
+                    0.02, 0.95 - i*0.11, # Adjust vertical spacing
+                    f"• {timestamp} - {alert}",
+                    color=COLORS['alert'],
+                    fontsize=9,
+                    fontweight='normal', # Normal weight for alerts
+                    transform=ax.transAxes, # Use axis coordinates
+                    verticalalignment='top' # Align text from top
+                 )
+                 artists.append(txt)
+        else:
+            txt = ax.text(
+                0.5, 0.5,
+                "NO ACTIVE ALERTS",
+                color=COLORS['success'],
+                ha='center',
+                va='center',
+                fontsize=11,
+                fontweight='bold',
+                transform=ax.transAxes
+            )
+            artists.append(txt)
+        return artists
+
+
+    def update_summary_panel(self, metrics):
+        """Update the system summary panel."""
+        ax = self.axes['summary']
+        ax.clear()
+        ax.set_title('SYSTEM SUMMARY', color=COLORS['accent'], pad=10, fontsize=12, fontweight='bold')
+        ax.axis('off')
+        artists = []
+
+        # System info (collected less frequently might be better, but ok here)
+        try:
+            cpu_count = psutil.cpu_count(logical=False)
+            cpu_logical = psutil.cpu_count(logical=True)
+            memory_total_gb = round(psutil.virtual_memory().total / (1024**3), 1)
+            disk_total_gb = round(psutil.disk_usage('/').total / (1024**3), 1)
+            memory_used_gb = round(psutil.virtual_memory().used / (1024**3), 1)
+            disk_used_gb = round(psutil.disk_usage('/').used / (1024**3), 1)
+        except Exception as e:
+            logging.error(f"Error getting static system info: {e}")
+            cpu_count, cpu_logical, memory_total_gb, disk_total_gb = 'N/A', 'N/A', 'N/A', 'N/A'
+            memory_used_gb, disk_used_gb = 'N/A', 'N/A'
+
+
+        # Format network values safely in case metrics is None briefly
+        net_sent_mb = metrics['network_sent'] / 1e6 if metrics else 0
+        net_recv_mb = metrics['network_recv'] / 1e6 if metrics else 0
+
+        sections = [
+            ("HARDWARE INFO", [
+                f"CPU Cores: {cpu_count} physical, {cpu_logical} logical",
+                f"Total Memory: {memory_total_gb} GB",
+                f"Total Disk (/): {disk_total_gb} GB"
+            ]),
+            ("CURRENT STATUS", [
+                f"CPU Usage: {metrics['cpu']:.1f}%" if metrics else 'N/A',
+                f"Memory Usage: {metrics['memory']:.1f}% ({memory_used_gb} GB)" if metrics else 'N/A',
+                f"Disk Usage (/): {metrics['disk']:.1f}% ({disk_used_gb} GB)" if metrics else 'N/A',
+                f"Active Processes: {metrics['process']}" if metrics else 'N/A',
+                f"Network Total: ↑{net_sent_mb:.1f}MB / ↓{net_recv_mb:.1f}MB"
+            ]),
+            ("ALERT HISTORY", [
+                f"Total Alerts Logged: {len(self.alert_history)}",
+                f"Last Alert Time: {self.alert_history[-1][0] if self.alert_history else 'None'}"
+            ])
+        ]
+
+        base_y = 0.95
+        section_spacing = 0.32 # Space between sections
+        item_spacing = 0.06 # Space between items in a section
+
+        for i, (title, items) in enumerate(sections):
+            section_y = base_y - i * section_spacing
+            # Section Title
+            txt_title = ax.text(0.02, section_y, title, color=COLORS['accent'], fontsize=10, fontweight='bold', transform=ax.transAxes, va='top')
+            artists.append(txt_title)
+
+            # Section Items
+            for j, item in enumerate(items):
+                item_y = section_y - 0.06 - j * item_spacing # Position items below title
+                txt_item = ax.text(0.05, item_y, item, color=COLORS['text'], fontsize=9, transform=ax.transAxes, va='top')
+                artists.append(txt_item)
+        return artists
+
+
+    def run(self):
+        """Start the dashboard animation."""
+        try:
+            self.animation = FuncAnimation(
+                self.fig,
+                self.update_dashboard,
+                frames=None, # Keep generating frames indefinitely
+                interval=self.update_interval,
+                blit=False, # Blitting is complex with dynamic text/layouts and widgets
+                cache_frame_data=False, # Avoid memory leak with long runs
+                repeat=False # Don't repeat animation
+            )
+            plt.show()
+            logging.info("Dashboard stopped")
+        except Exception as e:
+            logging.critical(f"Dashboard runtime error: {str(e)}", exc_info=True)
+            print(f"A critical error occurred: {e}. Check system_monitor.log for details.")
+            # Optional: Try to clean up plot window if possible
+            try:
+                plt.close(self.fig)
+            except Exception:
+                pass # Ignore errors during cleanup
