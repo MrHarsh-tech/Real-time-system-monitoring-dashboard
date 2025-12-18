@@ -816,4 +816,18 @@ def update_plot(self, ax, title, color, data_key, threshold_key=None, unit='%', 
             try:
                 plt.close(self.fig)
             except Exception:
-                pass # Ignore errors during cleanup
+                pass # Ignore errors during cleanu
+
+if __name__ == "__main__":
+    print("Starting System Monitor Dashboard...")
+    print("Check system_monitor.log for detailed activity.")
+    try:
+        dashboard = SystemMonitorDashboard()
+        dashboard.run()
+    except Exception as e:
+        logging.critical(f"Fatal error during dashboard initialization or run: {str(e)}", exc_info=True)
+        print(f"\nFATAL ERROR: {str(e)}")
+        print("The application could not start. Please check system_monitor.log for details.")
+        # Keep console open briefly to show error
+        # input("Press Enter to exit...") # Uncomment if running from a double-click scenario
+                
